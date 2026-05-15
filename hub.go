@@ -20,8 +20,46 @@ type Hub struct {
 func NewHub() *Hub {
 	return &Hub{
 		clients:    make(map[*Client]bool),
-		broadcast:  make(chan (*Client)),
+		broadcast:  make(chan []byte),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
+	}
+}
+
+// Adds a client to the hub's client map
+func (h *Hub) registerClient(client *Client) {
+	h.clients[client] = true
+}
+
+// Removes a client from the hub's client map
+func (h *Hub) unregisterClient(client *Client) {
+	delete(h.clients, client)
+}
+
+
+// broadcastMessage sends a message to all registered clients
+func (h *Hub) broadcastMessage(message []byte){
+	for client := range h.clients{
+		select{
+			case client.send <- message:
+				//Message sent
+			default: //Unregister problematic clients for now
+				close(client.send)
+				h.unregisterClient(client)
+		}
+	}
+}
+
+// Main couroutine that runs the hub, handling incoming messages and client registrations/unregistrations
+func (h *Hub) Run() {
+	for {
+		select{
+			case client := <- h.register:
+				h.registerClient(client)
+			case client := <- h.unregister:
+				h.unregisterClient(client)
+			case message := <- h.broadcast:
+				h.broadcastMessage(message)
+		}
 	}
 }
