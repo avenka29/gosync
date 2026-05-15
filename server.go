@@ -8,6 +8,10 @@ import (
 	"log"
 )
 
+//Read and write buffer sizes for websocket connections
+const READ_BUFFER_SIZE = 1024
+const WRITE_BUFFER_SIZE = 1024
+
 type Server struct {
 
 	// Central hub for internal state and operation management
@@ -21,10 +25,11 @@ type Server struct {
 func NewServer() *Server {
 
 	hub := NewHub()
+	go hub.Run()
 
 	websocketUpgrader := websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
+		ReadBufferSize:  READ_BUFFER_SIZE,
+		WriteBufferSize: WRITE_BUFFER_SIZE,
 		CheckOrigin: func(r *http.Request) bool { // [TODO] CHANGE THIS TO MORE ADVANCED CORS SETUP
 			return true
 		},
@@ -45,7 +50,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		http.Error(w, "Websocket Handshake Failed: "+err.Error(), http.StatusBadRequest)
-		log.Printf("Upgrade error: %v", nil)
+		log.Printf("Upgrade error: %v", err)
+		return
 	}
 
+	// Hand the connection over to the hub to manage
+	s.hub.HandleConnection(conn)
 }
