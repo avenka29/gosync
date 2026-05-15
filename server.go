@@ -54,7 +54,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	//Setups up client by adding it to the hub and starting the read/write goroutines
-	setupClient(s.hub, conn)
-	
+	// Hand the connection over to the hub to manage
+	s.hub.HandleConnection(conn)
 }

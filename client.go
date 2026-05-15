@@ -16,6 +16,14 @@ type Client struct {
 	send chan []byte
 }
 
+func NewClient(hub *Hub, conn *websocket.Conn) *Client {
+	return &Client{
+		hub:  hub,
+		conn: conn,
+		send: make(chan []byte, 256),
+	}
+}
+
 // readMessage pumps messages from the websocket connection to the hub.
 func (c *Client) readMessage() {
 	defer func() {
@@ -44,18 +52,4 @@ func (c *Client) writeMessage() {
 			return
 		}
 	}
-}
-
-// setupClient Setups up client by adding it to the hub and starting the read/write goroutines
-func setupClient(hub *Hub, conn *websocket.Conn) {
-	client := &Client{
-		hub:  hub,
-		conn: conn,
-		send: make(chan []byte, 256),
-	}
-
-	hub.register <- client
-
-	go client.writeMessage()
-	go client.readMessage()
 }
