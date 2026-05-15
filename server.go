@@ -25,6 +25,7 @@ type Server struct {
 func NewServer() *Server {
 
 	hub := NewHub()
+	go hub.Run()
 
 	websocketUpgrader := websocket.Upgrader{
 		ReadBufferSize:  READ_BUFFER_SIZE,
@@ -49,7 +50,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		http.Error(w, "Websocket Handshake Failed: "+err.Error(), http.StatusBadRequest)
-		log.Printf("Upgrade error: %v", nil)
+		log.Printf("Upgrade error: %v", err)
 		return
 	}
 

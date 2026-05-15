@@ -4,28 +4,58 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-
 // Client represents a single websocket client connection
 type Client struct {
-
-	//Central hub for managing connections
+	// Central hub for managing connections
 	hub *Hub
 
-	//The websocket connection for this client
+	// The websocket connection for this client
 	conn *websocket.Conn
 
-	//The channel for sending messages to the hub
+	// The channel for sending messages to the hub
 	send chan []byte
 }
 
-//Setups up client by adding it to the hub and starting the read/write goroutines
-func setupClient(hub *Hub, conn *websocket.Conn) {
+// readMessage pumps messages from the websocket connection to the hub.
+func (c *Client) readMessage() {
+	defer func() {
+		c.hub.unregister <- c
+		c.conn.Close()
+	}()
 
+	for {
+		_, message, err := c.conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		c.hub.broadcast <- message
+	}
+}
+
+// writeMessage pumps messages from the hub to the websocket connection.
+func (c *Client) writeMessage() {
+	defer func() {
+		c.conn.Close()
+	}()
+
+	for message := range c.send {
+		err := c.conn.WriteMessage(websocket.TextMessage, message)
+		if err != nil {
+			return
+		}
+	}
+}
+
+// setupClient Setups up client by adding it to the hub and starting the read/write goroutines
+func setupClient(hub *Hub, conn *websocket.Conn) {
 	client := &Client{
 		hub:  hub,
 		conn: conn,
-		send: make(chan []byte),
+		send: make(chan []byte, 256),
 	}
 
 	hub.register <- client
+
+	go client.writeMessage()
+	go client.readMessage()
 }
