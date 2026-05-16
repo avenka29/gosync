@@ -1,6 +1,8 @@
 package gosync
 
 import (
+	"encoding/json"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -12,21 +14,25 @@ type Hub struct {
 	clients map[*Client]bool
 
 	// Incoming messages from clients
-	broadcast chan []byte
+	broadcast chan *Event
 
 	// Incoming connection requests
 	register chan *Client
 
 	//Incoming disconnect requests
 	unregister chan *Client
+
+	// Contains incoming events from clients
+	EventPipe chan *EventContext
 }
 
 func NewHub() *Hub {
 	return &Hub{
 		clients:    make(map[*Client]bool),
-		broadcast:  make(chan []byte),
+		broadcast:  make(chan *Event),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
+		EventPipe: make(chan *EventContext, 1024),
 	}
 }
 
@@ -40,11 +46,15 @@ func (h *Hub) unregisterClient(client *Client) {
 	delete(h.clients, client)
 }
 
-// broadcastMessage sends a message to all registered clients
-func (h *Hub) broadcastMessage(message []byte) {
+// broadcastMessage sends a json payload to all registered clients through channel
+func (h *Hub) broadcastMessage(event Event) {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
 	for client := range h.clients {
 		select {
-		case client.send <- message:
+		case client.send <- payload:
 			//Message sent
 		default: //Unregister problematic clients for now
 			close(client.send)
@@ -54,7 +64,7 @@ func (h *Hub) broadcastMessage(message []byte) {
 }
 
 // HandleConnection creates a new client, registers it with the hub, and starts its pumps.
-func (h *Hub) HandleConnection(conn *websocket.Conn) {
+func (h *Hub) handleConnection(conn *websocket.Conn) {
 	client := NewClient(h, conn)
 	h.register <- client
 
@@ -71,7 +81,7 @@ func (h *Hub) Run() {
 		case client := <-h.unregister:
 			h.unregisterClient(client)
 		case message := <-h.broadcast:
-			h.broadcastMessage(message)
+			h.broadcastMessage(*message)
 		}
 	}
 }

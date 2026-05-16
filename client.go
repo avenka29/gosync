@@ -1,6 +1,8 @@
 package gosync
 
 import (
+	"encoding/json"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -32,11 +34,19 @@ func (c *Client) readMessage() {
 	}()
 
 	for {
-		_, message, err := c.conn.ReadMessage()
+		_, rawMessage, err := c.conn.ReadMessage()
 		if err != nil {
 			break
 		}
-		c.hub.broadcast <- message
+
+		// Unmarshal raw message in the pipe into an Event struct
+		var event Event
+		err = json.Unmarshal(rawMessage, &event)
+		if err != nil{
+			continue
+		}
+
+		c.hub.EventPipe <- &EventContext{Event: event, Client: c}
 	}
 }
 
@@ -46,6 +56,7 @@ func (c *Client) writeMessage() {
 		c.conn.Close()
 	}()
 
+	// Hub sends Event payloads to the client via the channel, so the client does not need to marshall the data
 	for message := range c.send {
 		err := c.conn.WriteMessage(websocket.TextMessage, message)
 		if err != nil {
