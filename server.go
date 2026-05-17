@@ -1,6 +1,7 @@
 package gosync
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/gorilla/websocket"
@@ -19,6 +20,7 @@ type Server struct {
 
 	// Websocket upgrader that turns intiial http -> Websocket
 	upgrader websocket.Upgrader
+
 }
 
 // Constructor to create a new server
@@ -55,5 +57,29 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Hand the connection over to the hub to manage
-	s.hub.HandleConnection(conn)
+	s.hub.handleConnection(conn)
+}
+
+
+// Given an interface form of an event, broadcast it to all connected clients
+func (s *Server) BroadcastEvent(name string, data interface{}) {
+	payload, err := json.Marshal(data)
+
+	if err != nil {
+		log.Printf("Marshal error: %v", err)
+		return
+	}
+	
+	event := Event{
+		Name: name,
+		Data: payload,
+	}
+
+	s.hub.broadcast <- &event
+}
+
+
+// Public read only channel for incoming events from clients
+func (s *Server) Events () <- chan *EventContext {
+	return s.hub.EventPipe
 }
