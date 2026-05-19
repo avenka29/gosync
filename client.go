@@ -6,6 +6,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// Max number of messages a client can have in their send channel
+const MESSAGE_LIMIT = 256
+
+
 // Client represents a single websocket client connection
 type Client struct {
 	// Central hub for managing connections

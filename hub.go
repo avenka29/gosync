@@ -5,6 +5,8 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+// Event pipe size
+const EVENT_PIPE_SIZE = 1024
 
 // Internal hub that contains in memory state and the central coroutine
 // Maintains list of registered clients, and for clients channels to register/unregister, and communicate with the central coroutine
@@ -24,6 +26,7 @@ type Hub struct {
 
 	// Contains incoming events from clients
 	EventPipe chan *EventContext
+
 }
 
 func NewHub() *Hub {
@@ -32,7 +35,7 @@ func NewHub() *Hub {
 		broadcast:  make(chan *Event),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
-		EventPipe: make(chan *EventContext, 1024),
+		EventPipe: make(chan *EventContext, EVENT_PIPE_SIZE),
 	}
 }
 
