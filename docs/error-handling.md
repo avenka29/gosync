@@ -39,6 +39,10 @@ for errCtx := range server.Errors() {
 }
 ```
 
+**Error Manager:** The error manager will handle deffered errors. It will own two error channels: internal and external. The internal channel is used as a landing page for all deffered errors acorss the system. The external channel acts as the public api for users to access the error messages. 
+
+This design allows library side self healing mechanisms, while still providing metrics and logging. For example, during a thundering herd scenario, where 10,000 clients are disconnected simultaneously, the internal pipe will take these raw requests, act as a buffer, and can expose a couple errors/logs to the public channel, rather than just overwhelming the public channel. 
+
 ---
 
 ## Error Handling Matrix
