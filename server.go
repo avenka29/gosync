@@ -61,6 +61,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Given an interface form of an event, broadcast it to all connected clients
 func (s *Server) BroadcastEvent(name string, data interface{}) error {
+
+	if name == "" || data == nil {
+		return ErrServerMsgInvalid
+	}
+
 	eventContext, err := createEventContext(name, data)
 
 	if err != nil {
