@@ -9,7 +9,6 @@ import (
 // Max number of messages a client can have in their send channel
 const MESSAGE_LIMIT = 256
 
-
 // Client represents a single websocket client connection
 type Client struct {
 	// Central hub for managing connections
@@ -19,14 +18,14 @@ type Client struct {
 	conn *websocket.Conn
 
 	// The channel for sending messages to the hub
-	send chan []byte
+	send chan *EventContext
 }
 
 func NewClient(hub *Hub, conn *websocket.Conn) *Client {
 	return &Client{
 		hub:  hub,
 		conn: conn,
-		send: make(chan []byte, 256),
+		send: make(chan *EventContext, 256),
 	}
 }
 
@@ -46,11 +45,17 @@ func (c *Client) readMessage() {
 		// Unmarshal raw message in the pipe into an Event struct
 		var event Event
 		err = json.Unmarshal(rawMessage, &event)
-		if err != nil{
+		if err != nil {
 			continue
 		}
 
-		c.hub.EventPipe <- &EventContext{Event: event, Client: c}
+		eventContext := &EventContext{
+			Event:  &event,
+			Raw:    rawMessage,
+			Client: c,
+		}
+
+		c.hub.EventPipe <- eventContext
 	}
 }
 
@@ -60,9 +65,9 @@ func (c *Client) writeMessage() {
 		c.conn.Close()
 	}()
 
-	// Hub sends Event payloads to the client via the channel, so the client does not need to marshall the data
-	for message := range c.send {
-		err := c.conn.WriteMessage(websocket.TextMessage, message)
+	// Hub sends EventContext objects to the client via the channel, client sends the pre-marshalled over socket
+	for eventContext := range c.send {
+		err := c.conn.WriteMessage(websocket.TextMessage, eventContext.Raw)
 		if err != nil {
 			return
 		}
