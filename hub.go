@@ -1,10 +1,11 @@
 package gosync
 
 import (
-	"encoding/json"
-
 	"github.com/gorilla/websocket"
 )
+
+// Event pipe size
+const EVENT_PIPE_SIZE = 1024
 
 // Internal hub that contains in memory state and the central coroutine
 // Maintains list of registered clients, and for clients channels to register/unregister, and communicate with the central coroutine
@@ -14,7 +15,7 @@ type Hub struct {
 	clients map[*Client]bool
 
 	// Incoming messages from clients
-	broadcast chan *Event
+	broadcast chan *EventContext
 
 	// Incoming connection requests
 	register chan *Client
@@ -29,10 +30,10 @@ type Hub struct {
 func NewHub() *Hub {
 	return &Hub{
 		clients:    make(map[*Client]bool),
-		broadcast:  make(chan *Event),
+		broadcast:  make(chan *EventContext),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
-		EventPipe: make(chan *EventContext, 1024),
+		EventPipe:  make(chan *EventContext, EVENT_PIPE_SIZE),
 	}
 }
 
@@ -46,15 +47,11 @@ func (h *Hub) unregisterClient(client *Client) {
 	delete(h.clients, client)
 }
 
-// broadcastMessage sends a json payload to all registered clients through channel
-func (h *Hub) broadcastMessage(event Event) {
-	payload, err := json.Marshal(event)
-	if err != nil {
-		return
-	}
+// broadcastMessage sends pointer to event context to the client websockets
+func (h *Hub) broadcastMessage(event *EventContext) {
 	for client := range h.clients {
 		select {
-		case client.send <- payload:
+		case client.send <- event:
 			//Message sent
 		default: //Unregister problematic clients for now
 			close(client.send)
@@ -81,7 +78,7 @@ func (h *Hub) Run() {
 		case client := <-h.unregister:
 			h.unregisterClient(client)
 		case message := <-h.broadcast:
-			h.broadcastMessage(*message)
+			h.broadcastMessage(message)
 		}
 	}
 }

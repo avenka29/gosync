@@ -9,7 +9,7 @@ import (
 	"log"
 )
 
-//Read and write buffer sizes for websocket connections
+// Read and write buffer sizes for websocket connections
 const READ_BUFFER_SIZE = 1024
 const WRITE_BUFFER_SIZE = 1024
 
@@ -20,7 +20,6 @@ type Server struct {
 
 	// Websocket upgrader that turns intiial http -> Websocket
 	upgrader websocket.Upgrader
-
 }
 
 // Constructor to create a new server
@@ -60,26 +59,54 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.hub.handleConnection(conn)
 }
 
-
 // Given an interface form of an event, broadcast it to all connected clients
-func (s *Server) BroadcastEvent(name string, data interface{}) {
+func (s *Server) BroadcastEvent(name string, data interface{}) error {
+
+	if name == "" || data == nil {
+		return ErrServerMsgInvalid
+	}
+
+	eventContext, err := createEventContext(name, data)
+
+	if err != nil {
+		return ErrServerMsgInvalid
+	}
+	s.hub.broadcast <- eventContext
+
+	return nil
+}
+
+// Creates internal event context object, along with the external event
+// Along with a json represenation of the external event
+func createEventContext(name string, data interface{}) (*EventContext, error) {
 	payload, err := json.Marshal(data)
 
 	if err != nil {
-		log.Printf("Marshal error: %v", err)
-		return
+		return nil, err
 	}
-	
-	event := Event{
+
+	event := &Event{
 		Name: name,
 		Data: payload,
 	}
 
-	s.hub.broadcast <- &event
+	event_json, error := json.Marshal(event)
+
+	if error != nil {
+		return nil, error
+	}
+
+	eventContext := &EventContext{
+		Event:  event,
+		Raw:    event_json,
+		Client: nil,
+	}
+
+	return eventContext, nil
+
 }
 
-
 // Public read only channel for incoming events from clients
-func (s *Server) Events () <- chan *EventContext {
+func (s *Server) Events() <-chan *EventContext {
 	return s.hub.EventPipe
 }
