@@ -13,4 +13,6 @@ type EventContext struct {
 	Event  *Event
 	Raw    []byte // Raw json representation of message
 	Client *Client
+	Room   string // Target room for the event (empty for global broadcast)
 }
+

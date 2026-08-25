@@ -76,6 +76,41 @@ func (s *Server) BroadcastEvent(name string, data interface{}) error {
 	return nil
 }
 
+// BroadcastToRoom sends an event to all clients in a specific room.
+func (s *Server) BroadcastToRoom(room string, name string, data interface{}) error {
+	if room == "" {
+		return ErrServerMsgInvalid
+	}
+	if name == "" || data == nil {
+		return ErrServerMsgInvalid
+	}
+
+	eventContext, err := createEventContext(name, data)
+	if err != nil {
+		return ErrServerMsgInvalid
+	}
+	eventContext.Room = room
+	s.hub.broadcast <- eventContext
+
+	return nil
+}
+
+// JoinRoom registers a client to a room.
+func (s *Server) JoinRoom(client *Client, room string) {
+	s.hub.joinRoom <- roomOp{
+		client: client,
+		room:   room,
+	}
+}
+
+// LeaveRoom unregisters a client from a room.
+func (s *Server) LeaveRoom(client *Client, room string) {
+	s.hub.leaveRoom <- roomOp{
+		client: client,
+		room:   room,
+	}
+}
+
 // Creates internal event context object, along with the external event
 // Along with a json represenation of the external event
 func createEventContext(name string, data interface{}) (*EventContext, error) {
