@@ -19,13 +19,17 @@ type Client struct {
 
 	// The channel for sending messages to the hub
 	send chan *EventContext
+
+	// Rooms the client is currently in
+	rooms map[string]bool
 }
 
 func NewClient(hub *Hub, conn *websocket.Conn) *Client {
 	return &Client{
-		hub:  hub,
-		conn: conn,
-		send: make(chan *EventContext, 256),
+		hub:   hub,
+		conn:  conn,
+		send:  make(chan *EventContext, 256),
+		rooms: make(map[string]bool),
 	}
 }
 
