@@ -1,12 +1,17 @@
 package gosync
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/gorilla/websocket"
 
 	"log"
 )
+
+// Read and write buffer sizes for websocket connections
+const READ_BUFFER_SIZE = 1024
+const WRITE_BUFFER_SIZE = 1024
 
 type Server struct {
 
@@ -21,10 +26,11 @@ type Server struct {
 func NewServer() *Server {
 
 	hub := NewHub()
+	go hub.Run()
 
 	websocketUpgrader := websocket.Upgrader{
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
+		ReadBufferSize:  READ_BUFFER_SIZE,
+		WriteBufferSize: WRITE_BUFFER_SIZE,
 		CheckOrigin: func(r *http.Request) bool { // [TODO] CHANGE THIS TO MORE ADVANCED CORS SETUP
 			return true
 		},
@@ -45,7 +51,97 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		http.Error(w, "Websocket Handshake Failed: "+err.Error(), http.StatusBadRequest)
-		log.Printf("Upgrade error: %v", nil)
+		log.Printf("Upgrade error: %v", err)
+		return
 	}
 
+	// Hand the connection over to the hub to manage
+	s.hub.handleConnection(conn)
+}
+
+// Given an interface form of an event, broadcast it to all connected clients
+func (s *Server) BroadcastEvent(name string, data interface{}) error {
+
+	if name == "" || data == nil {
+		return ErrServerMsgInvalid
+	}
+
+	eventContext, err := createEventContext(name, data)
+
+	if err != nil {
+		return ErrServerMsgInvalid
+	}
+	s.hub.broadcast <- eventContext
+
+	return nil
+}
+
+// BroadcastToRoom sends an event to all clients in a specific room.
+func (s *Server) BroadcastToRoom(room string, name string, data interface{}) error {
+	if room == "" {
+		return ErrServerMsgInvalid
+	}
+	if name == "" || data == nil {
+		return ErrServerMsgInvalid
+	}
+
+	eventContext, err := createEventContext(name, data)
+	if err != nil {
+		return ErrServerMsgInvalid
+	}
+	eventContext.Room = room
+	s.hub.broadcast <- eventContext
+
+	return nil
+}
+
+// JoinRoom registers a client to a room.
+func (s *Server) JoinRoom(client *Client, room string) {
+	s.hub.joinRoom <- roomOp{
+		client: client,
+		room:   room,
+	}
+}
+
+// LeaveRoom unregisters a client from a room.
+func (s *Server) LeaveRoom(client *Client, room string) {
+	s.hub.leaveRoom <- roomOp{
+		client: client,
+		room:   room,
+	}
+}
+
+// Creates internal event context object, along with the external event
+// Along with a json represenation of the external event
+func createEventContext(name string, data interface{}) (*EventContext, error) {
+	payload, err := json.Marshal(data)
+
+	if err != nil {
+		return nil, err
+	}
+
+	event := &Event{
+		Name: name,
+		Data: payload,
+	}
+
+	event_json, error := json.Marshal(event)
+
+	if error != nil {
+		return nil, error
+	}
+
+	eventContext := &EventContext{
+		Event:  event,
+		Raw:    event_json,
+		Client: nil,
+	}
+
+	return eventContext, nil
+
+}
+
+// Public read only channel for incoming events from clients
+func (s *Server) Events() <-chan *EventContext {
+	return s.hub.EventPipe
 }
