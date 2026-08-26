@@ -7,25 +7,19 @@ import (
 
 func TestHub_RegisterUnregister(t *testing.T) {
 	hub := NewHub()
-	go hub.Run()
 
 	// Create a mock client
 	client := NewClient(hub, nil)
 
 	// 1. Test Registration
-	hub.register <- client
-	
-	// Give the hub a moment to process the channel
-	time.Sleep(10 * time.Millisecond)
+	hub.registerClient(client)
 
 	if _, ok := hub.clients[client]; !ok {
 		t.Error("Client failed to register with hub")
 	}
 
 	// 2. Test Unregistration
-	hub.unregister <- client
-	
-	time.Sleep(10 * time.Millisecond)
+	hub.unregisterClient(client)
 
 	if _, ok := hub.clients[client]; ok {
 		t.Error("Client failed to unregister from hub")
@@ -34,16 +28,13 @@ func TestHub_RegisterUnregister(t *testing.T) {
 
 func TestHub_Broadcast(t *testing.T) {
 	hub := NewHub()
-	go hub.Run()
 
 	// Create two mock clients
 	client1 := NewClient(hub, nil)
 	client2 := NewClient(hub, nil)
 
-	hub.register <- client1
-	hub.register <- client2
-	
-	time.Sleep(10 * time.Millisecond)
+	hub.registerClient(client1)
+	hub.registerClient(client2)
 
 	// Create a test event
 	testCtx := &EventContext{
@@ -52,7 +43,7 @@ func TestHub_Broadcast(t *testing.T) {
 	}
 
 	// Broadcast the event
-	hub.broadcast <- testCtx
+	hub.broadcastMessage(testCtx)
 
 	// Verify both clients received the event
 	select {
@@ -76,12 +67,10 @@ func TestHub_Broadcast(t *testing.T) {
 
 func TestHub_SlowConsumer(t *testing.T) {
 	hub := NewHub()
-	go hub.Run()
 
 	// Create a client with a small buffer and fill it
 	client := NewClient(hub, nil)
-	hub.register <- client
-	time.Sleep(10 * time.Millisecond)
+	hub.registerClient(client)
 
 	// Fill the client's send channel (buffer is 256)
 	for i := 0; i < 256; i++ {
@@ -90,9 +79,7 @@ func TestHub_SlowConsumer(t *testing.T) {
 
 	// Now broadcast one more message. The Hub should drop this client
 	// instead of blocking the whole broadcast loop.
-	hub.broadcast <- &EventContext{Raw: []byte("overflow")}
-	
-	time.Sleep(10 * time.Millisecond)
+	hub.broadcastMessage(&EventContext{Raw: []byte("overflow")})
 
 	if _, ok := hub.clients[client]; ok {
 		t.Error("Slow consumer client should have been removed from hub")
@@ -101,18 +88,15 @@ func TestHub_SlowConsumer(t *testing.T) {
 
 func TestHub_Rooms(t *testing.T) {
 	hub := NewHub()
-	go hub.Run()
 
 	client1 := NewClient(hub, nil)
 	client2 := NewClient(hub, nil)
 
-	hub.register <- client1
-	hub.register <- client2
-	time.Sleep(10 * time.Millisecond)
+	hub.registerClient(client1)
+	hub.registerClient(client2)
 
 	// 1. Join room-1 for client1
-	hub.joinRoom <- roomOp{client: client1, room: "room-1"}
-	time.Sleep(10 * time.Millisecond)
+	hub.registerClientToRoom(client1, "room-1")
 
 	testCtx := &EventContext{
 		Event: &Event{Name: "test", Data: []byte(`"hello"`)},
@@ -121,7 +105,7 @@ func TestHub_Rooms(t *testing.T) {
 	}
 
 	// 2. Broadcast to room-1
-	hub.broadcast <- testCtx
+	hub.broadcastMessage(testCtx)
 
 	// client1 should receive it
 	select {
@@ -142,11 +126,10 @@ func TestHub_Rooms(t *testing.T) {
 	}
 
 	// 3. Leave room-1 for client1
-	hub.leaveRoom <- roomOp{client: client1, room: "room-1"}
-	time.Sleep(10 * time.Millisecond)
+	hub.unregisterClientFromRoom(client1, "room-1")
 
 	// Broadcast again to room-1
-	hub.broadcast <- testCtx
+	hub.broadcastMessage(testCtx)
 
 	// client1 should NOT receive it now
 	select {

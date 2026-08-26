@@ -81,10 +81,14 @@ func (h *Hub) unregisterClientFromRoom(client *Client, room string) {
 
 // Removes a client from the hub's client map and all rooms
 func (h *Hub) unregisterClient(client *Client) {
+	if _, registered := h.clients[client]; !registered {
+		return
+	}
 	for room := range client.rooms {
 		h.unregisterClientFromRoom(client, room)
 	}
 	delete(h.clients, client)
+	close(client.send)
 }
 
 // broadcastMessage sends pointer to event context to the client websockets
@@ -100,7 +104,6 @@ func (h *Hub) broadcastMessage(event *EventContext) {
 			case client.send <- event:
 				//Message sent
 			default:
-				close(client.send)
 				h.unregisterClient(client)
 			}
 		}
@@ -113,7 +116,6 @@ func (h *Hub) broadcastMessage(event *EventContext) {
 		case client.send <- event:
 			//Message sent
 		default: //Unregister problematic clients for now
-			close(client.send)
 			h.unregisterClient(client)
 		}
 	}
