@@ -211,14 +211,23 @@ func TestServer_Rooms(t *testing.T) {
 		t.Errorf("Expected room-event, got %s", rec1.Name)
 	}
 
-	// Client 2 should NOT receive the message
-	ws2.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-	_, _, err = ws2.ReadMessage()
-	if err == nil {
-		t.Error("Client 2 received message, but it was not in room-a")
+	// Begin a read before the next broadcast. If client 2 incorrectly received
+	// the first room event, the read completes during this quiet window. Keeping
+	// the read pending avoids corrupting the Gorilla connection with a timeout.
+	type readResult struct {
+		message []byte
+		err     error
 	}
-	// Reset deadline for ws2
-	ws2.SetReadDeadline(time.Time{})
+	client2Read := make(chan readResult, 1)
+	go func() {
+		_, message, readErr := ws2.ReadMessage()
+		client2Read <- readResult{message: message, err: readErr}
+	}()
+	select {
+	case result := <-client2Read:
+		t.Fatalf("Client 2 received an unexpected message: %q (error: %v)", result.message, result.err)
+	case <-time.After(50 * time.Millisecond):
+	}
 
 	// 6. Join room-a for client2
 	gs.JoinRoom(client2, "room-a")
@@ -234,10 +243,11 @@ func TestServer_Rooms(t *testing.T) {
 		t.Errorf("Expected room-event-2 for client1, got %s", rec1.Name)
 	}
 
-	_, message2, err := ws2.ReadMessage()
-	if err != nil {
-		t.Fatalf("ws2 failed to read: %v", err)
+	result2 := <-client2Read
+	if result2.err != nil {
+		t.Fatalf("ws2 failed to read: %v", result2.err)
 	}
+	message2 := result2.message
 	var rec2 Event
 	json.Unmarshal(message2, &rec2)
 	if rec2.Name != "room-event-2" {
@@ -258,11 +268,16 @@ func TestServer_Rooms(t *testing.T) {
 		t.Errorf("Expected room-event-3 for client2, got %s", rec2.Name)
 	}
 
-	// Client 1 should NOT receive it
-	ws1.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
-	_, _, err = ws1.ReadMessage()
-	if err == nil {
-		t.Error("Client 1 received message after leaving room-a")
+	// Client 1 should NOT receive it. Closing ws1 at test cleanup unblocks the
+	// pending read without setting a destructive read deadline.
+	client1Read := make(chan readResult, 1)
+	go func() {
+		_, message, readErr := ws1.ReadMessage()
+		client1Read <- readResult{message: message, err: readErr}
+	}()
+	select {
+	case result := <-client1Read:
+		t.Fatalf("Client 1 received an unexpected message after leaving: %q (error: %v)", result.message, result.err)
+	case <-time.After(50 * time.Millisecond):
 	}
-	ws1.SetReadDeadline(time.Time{})
 }
