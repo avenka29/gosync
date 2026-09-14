@@ -1,2 +1,2 @@
-// Package transport contains network adapters for Engine.IO sessions.
+// Package transport adapts network transports to Engine.IO frames.
 package transport

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/avenka29/gosync/internal/engineio"
 	"github.com/gorilla/websocket"
@@ -12,9 +13,7 @@ import (
 
 var ErrUnsupportedWebSocketMessage = errors.New("transport: unsupported WebSocket message type")
 
-// WebSocket adapts a Gorilla WebSocket connection to an Engine.IO transport.
-// Engine.IO heartbeats are text packets and are independent from WebSocket
-// control-frame ping and pong messages.
+// WebSocket adapts a Gorilla connection to Engine.IO frames.
 type WebSocket struct {
 	connection *websocket.Conn
 	closeOnce  sync.Once
@@ -54,11 +53,18 @@ func (transport *WebSocket) Read(ctx context.Context) (engineio.Frame, error) {
 
 // Write writes one complete Engine.IO frame.
 func (transport *WebSocket) Write(ctx context.Context, frame engineio.Frame) error {
-	if deadline, ok := ctx.Deadline(); ok {
-		if err := transport.connection.SetWriteDeadline(deadline); err != nil {
-			return err
-		}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
+	deadline := time.Now().Add(10 * time.Second)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	if err := transport.connection.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+	stop := context.AfterFunc(ctx, func() { _ = transport.Close() })
+	defer stop()
 
 	messageType := websocket.TextMessage
 	if frame.Binary {

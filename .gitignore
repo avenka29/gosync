@@ -22,21 +22,12 @@ gosync
 .vscode/
 .idea/
 
-# Local code indexing and AI assistant files
+# Local code indexing
 graphify-out/
 .graphify/
-.codex/
-.claude/
-.cursor/
-.continue/
-.windsurf/
-.gemini/
-.cline/
-.roo/
-.llm/
-.ai/
-.aider*
-CLAUDE.md
-GEMINI.md
-AGENTS.md
-.github/copilot-instructions.md
+
+# JavaScript integration dependencies
+node_modules/
+
+# Local verification artifacts
+.validation/

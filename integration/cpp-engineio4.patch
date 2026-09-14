@@ -1,0 +1,30 @@
+diff --git a/src/internal/sio_client_impl.cpp b/src/internal/sio_client_impl.cpp
+index 02ccead..ce29d25 100644
+--- a/src/internal/sio_client_impl.cpp
++++ b/src/internal/sio_client_impl.cpp
+@@ -496 +496 @@ namespace sio
+-        m_packet_mgr.put_payload(msg->get_payload());
++        m_packet_mgr.put_payload(msg->get_payload(), msg->get_opcode() == frame::opcode::binary);
+diff --git a/src/internal/sio_packet.cpp b/src/internal/sio_packet.cpp
+index da73edb..9c8226b 100644
+--- a/src/internal/sio_packet.cpp
++++ b/src/internal/sio_packet.cpp
+@@ -250 +250 @@ namespace sio
+-            assert(is_binary_message(buf_payload));//this is ensured by outside.
++            // The WebSocket opcode identifies an Engine.IO 4 binary attachment.
+@@ -476 +476 @@ namespace sio
+-    void packet_manager::put_payload(string const& payload)
++    void packet_manager::put_payload(string const& payload, bool binary)
+@@ -481 +481 @@ namespace sio
+-            if(packet::is_text_message(payload))
++            if(!binary && packet::is_text_message(payload))
+@@ -493 +493 @@ namespace sio
+-            else if(packet::is_binary_message(payload))
++            else if(binary)
+diff --git a/src/internal/sio_packet.h b/src/internal/sio_packet.h
+index c43a0ae..52315a8 100644
+--- a/src/internal/sio_packet.h
++++ b/src/internal/sio_packet.h
+@@ -94 +94 @@ namespace sio
+-        void put_payload(string const& payload);
++        void put_payload(string const& payload, bool binary = false);

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -69,7 +70,7 @@ func TestWebSocketServerRejectsInvalidHandshakes(t *testing.T) {
 		query  string
 		status int
 	}{
-		{name: "method", method: http.MethodPost, query: "?EIO=4&transport=websocket", status: http.StatusMethodNotAllowed},
+		{name: "method", method: http.MethodPost, query: "?EIO=4&transport=websocket", status: http.StatusBadRequest},
 		{name: "missing query", method: http.MethodGet, status: http.StatusBadRequest},
 		{name: "old revision", method: http.MethodGet, query: "?EIO=3&transport=websocket", status: http.StatusBadRequest},
 		{name: "unsupported polling", method: http.MethodGet, query: "?EIO=4&transport=polling", status: http.StatusBadRequest},
@@ -87,4 +88,57 @@ func TestWebSocketServerRejectsInvalidHandshakes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWebSocketServerClosesOversizedFrame(t *testing.T) {
+	t.Parallel()
+
+	server := NewWebSocketServer(Config{
+		MaxPayload:   8,
+		PingInterval: time.Hour,
+		PingTimeout:  time.Hour,
+	}, nil)
+	httpServer := httptest.NewServer(server)
+	defer httpServer.Close()
+
+	url := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "?EIO=4&transport=websocket"
+	connection, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	if _, _, err := connection.ReadMessage(); err != nil {
+		t.Fatalf("read handshake: %v", err)
+	}
+	if err := connection.WriteMessage(websocket.TextMessage, []byte("4too-long")); err != nil {
+		t.Fatal(err)
+	}
+	connection.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := connection.ReadMessage(); err == nil {
+		t.Fatal("connection remained open after an oversized frame")
+	}
+}
+
+func TestCallbackPanicsAreContained(t *testing.T) {
+	reports := make(chan error, 1)
+	server := NewServer(Config{
+		OnError: func(err error) { reports <- err },
+		OnSessionClose: func(string, error) {
+			panic("close callback")
+		},
+	}, func(Sender) engineio.MessageHandler {
+		panic("open callback")
+	})
+	if _, err := server.createHandler("session", nil, nil); err == nil {
+		t.Fatal("open callback panic was not returned")
+	}
+	server.notifySessionClose("session", nil)
+	select {
+	case <-reports:
+	case <-time.After(time.Second):
+		t.Fatal("close callback panic was not reported")
+	}
+
+	server.config.OnError = func(error) { panic("error callback") }
+	server.report(errors.New("test"))
 }

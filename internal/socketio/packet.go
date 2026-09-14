@@ -46,28 +46,20 @@ func (t PacketType) String() string {
 	}
 }
 
-// Packet is the transport-independent representation of one Socket.IO packet.
-// Data must be a normalized JSON value: nil, bool, string, json.Number, a numeric
-// Go value, []any, map[string]any, json.RawMessage, or []byte for binary data.
+// Packet is one transport-independent Socket.IO packet.
 type Packet struct {
 	Type PacketType
 
-	// Namespace defaults to "/" when empty.
 	Namespace string
 
-	// ID is present when an event requests an acknowledgement or an ACK answers
-	// one. A pointer distinguishes packet ID zero from an absent packet ID.
 	ID *uint64
 
 	Data any
 
-	// Attachments is populated while decoding a binary packet header. Call
-	// Codec.Reconstruct after receiving exactly this many binary attachments.
 	Attachments int
 }
 
-// EncodedPacket contains one text header and any binary Engine.IO message
-// payloads that must immediately follow it.
+// EncodedPacket contains a text header followed by binary attachments.
 type EncodedPacket struct {
 	Header      []byte
 	Attachments [][]byte

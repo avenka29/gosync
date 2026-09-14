@@ -81,11 +81,17 @@ func TestFrameValidation(t *testing.T) {
 	if _, err := DecodeFrame(Frame{Payload: []byte("9bad")}); !errors.Is(err, ErrInvalidPacketType) {
 		t.Fatalf("DecodeFrame(invalid) error = %v, want ErrInvalidPacketType", err)
 	}
+	if _, err := DecodeFrame(Frame{Payload: []byte{'4', 0xff}}); !errors.Is(err, ErrInvalidTextEncoding) {
+		t.Fatalf("DecodeFrame(invalid UTF-8) error = %v, want ErrInvalidTextEncoding", err)
+	}
 	if _, err := EncodeFrame(Packet{Type: PacketPing, Binary: true}); !errors.Is(err, ErrInvalidBinaryPacket) {
 		t.Fatalf("EncodeFrame(binary ping) error = %v, want ErrInvalidBinaryPacket", err)
 	}
 	if _, err := EncodeFrame(Packet{Type: PacketType(99)}); !errors.Is(err, ErrInvalidPacketType) {
 		t.Fatalf("EncodeFrame(invalid) error = %v, want ErrInvalidPacketType", err)
+	}
+	if _, err := EncodeFrame(Packet{Type: PacketMessage, Data: []byte{0xff}}); !errors.Is(err, ErrInvalidTextEncoding) {
+		t.Fatalf("EncodeFrame(invalid UTF-8) error = %v, want ErrInvalidTextEncoding", err)
 	}
 }
 
