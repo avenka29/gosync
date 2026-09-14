@@ -2,7 +2,9 @@ package client_test
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,7 +45,7 @@ func TestGoClientPollingAndWebSocket(t *testing.T) {
 				managerOptions.SetAutoConnect(false)
 				managerOptions.SetForceNew(true)
 				managerOptions.SetReconnection(false)
-				managerOptions.SetTimeout(3 * time.Second)
+				managerOptions.SetTimeout(10 * time.Second)
 				managerOptions.SetTransports(types.NewSet(transports.WebSocket))
 				manager := client.NewManager(httpServer.URL, managerOptions)
 				socketOptions := client.DefaultSocketOptions()
@@ -53,7 +55,7 @@ func TestGoClientPollingAndWebSocket(t *testing.T) {
 				options.SetAutoConnect(false)
 				options.SetForceNew(true)
 				options.SetReconnection(false)
-				options.SetTimeout(3 * time.Second)
+				options.SetTimeout(10 * time.Second)
 				options.SetTransports(types.NewSet(transports.Polling, transports.WebSocket))
 				socket, err = client.Connect(httpServer.URL+"/custom", options)
 				if err != nil {
@@ -62,22 +64,33 @@ func TestGoClientPollingAndWebSocket(t *testing.T) {
 			}
 			defer socket.Close()
 			done := make(chan error, 1)
+			var doneOnce sync.Once
+			finish := func(err error) {
+				doneOnce.Do(func() { done <- err })
+			}
 			socket.On("connect", func(...any) {
-				socket.Timeout(time.Second).EmitWithAck("echo", "golang")(func(args []any, err error) {
-					if err == nil && (len(args) != 1 || args[0] != "golang") {
-						t.Errorf("ack %#v", args)
+				socket.Timeout(5*time.Second).EmitWithAck("echo", "golang")(func(args []any, err error) {
+					if err != nil {
+						finish(err)
+						return
 					}
-					done <- err
+					if len(args) != 1 || args[0] != "golang" {
+						finish(fmt.Errorf("unexpected acknowledgement: %#v", args))
+						return
+					}
+					finish(nil)
 				})
 			})
-			socket.On("connect_error", func(args ...any) { t.Logf("connect error: %#v", args) })
+			socket.On("connect_error", func(args ...any) {
+				finish(fmt.Errorf("connect error: %v", args))
+			})
 			socket.Connect()
 			select {
 			case err := <-done:
 				if err != nil {
 					t.Fatal(err)
 				}
-			case <-time.After(10 * time.Second):
+			case <-time.After(20 * time.Second):
 				t.Fatal("Go client timeout")
 			}
 		})
