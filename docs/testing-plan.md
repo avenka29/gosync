@@ -34,6 +34,10 @@ The scripts clone exact upstream commits so results do not silently change. The
 C++ build applies `integration/cpp-engineio4.patch`, which makes the client use
 the WebSocket opcode to recognize Engine.IO 4 binary attachments.
 
+The official suites use `chai-string` 1.6, which requires Chai 4. Dependabot
+keeps Chai on that compatible major version. The QUIC and WebTransport pins are
+explained in [implementation status](implementation-status.md).
+
 CI repeats race tests three times, enforces at least 80% cross-package coverage,
 and runs vet, Staticcheck, GoCritic, complexity and dead-code analysis, gosec,
 Actionlint, the Go vulnerability scanner, decoder fuzzing, npm audit, both
