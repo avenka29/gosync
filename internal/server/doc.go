@@ -1,3 +1,2 @@
-// Package server composes HTTP, WebSocket transport, and Engine.IO session
-// lifecycle without depending on Socket.IO application concepts.
+// Package server serves Engine.IO sessions over HTTP transports.
 package server

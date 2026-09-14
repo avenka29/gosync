@@ -1,283 +1,347 @@
 package gosync
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/avenka29/gosync/internal/socketio"
 	"github.com/gorilla/websocket"
 )
 
-func TestBroadcastEvent_Validation(t *testing.T) {
-	server := NewServer()
-
-	tests := []struct {
-		name    string
-		evtName string
-		data    interface{}
-		wantErr error
-	}{
-		{
-			name:    "Empty Event Name",
-			evtName: "",
-			data:    "some data",
-			wantErr: ErrServerMsgInvalid,
-		},
-		{
-			name:    "Nil Data",
-			evtName: "chat",
-			data:    nil,
-			wantErr: ErrServerMsgInvalid,
-		},
-		{
-			name:    "Non-Serializable Data (Function)",
-			evtName: "chat",
-			data:    func() {}, // Functions cannot be marshaled to JSON
-			wantErr: ErrServerMsgInvalid,
-		},
-		{
-			name:    "Valid Data",
-			evtName: "chat",
-			data:    "hello",
-			wantErr: nil,
-		},
+func testServer(t *testing.T, config Config) (*Server, string) {
+	t.Helper()
+	server, err := NewServer(config)
+	if err != nil {
+		t.Fatal(err)
 	}
+	httpServer := httptest.NewServer(server)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := server.Close(ctx); err != nil {
+			t.Error(err)
+		}
+		httpServer.Close()
+	})
+	return server, "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/socket.io/?EIO=4&transport=websocket"
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := server.BroadcastEvent(tt.evtName, tt.data)
+func dialTest(t *testing.T, url string) *websocket.Conn {
+	t.Helper()
+	connection, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	if err := connection.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	_, payload, err := connection.ReadMessage()
+	if err != nil || len(payload) == 0 || payload[0] != '0' {
+		t.Fatalf("handshake %q %v", payload, err)
+	}
+	return connection
+}
 
-			if tt.wantErr != nil {
-				if !errors.Is(err, tt.wantErr) {
-					t.Errorf("BroadcastEvent() error = %v, wantErr %v", err, tt.wantErr)
+func writeTest(t *testing.T, connection *websocket.Conn, text string) {
+	t.Helper()
+	if err := connection.WriteMessage(websocket.TextMessage, []byte(text)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readTest(t *testing.T, connection *websocket.Conn) socketio.Packet {
+	t.Helper()
+	_, payload, err := connection.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) == 0 || payload[0] != '4' {
+		t.Fatalf("message %q", payload)
+	}
+	codec := socketio.NewCodec(0, 0)
+	packet, err := codec.DecodeHeader(payload[1:])
+	if err != nil {
+		t.Fatalf("decode %q: %v", payload, err)
+	}
+	if packet.Type.Binary() {
+		var buffers [][]byte
+		for range packet.Attachments {
+			kind, attachment, err := connection.ReadMessage()
+			if err != nil || kind != websocket.BinaryMessage {
+				t.Fatalf("attachment %d %v", kind, err)
+			}
+			buffers = append(buffers, attachment)
+		}
+		packet, err = codec.Reconstruct(packet, buffers)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return packet
+}
+
+func connectTest(t *testing.T, connection *websocket.Conn, namespace string) {
+	t.Helper()
+	writeTest(t, connection, "40"+namespace+",")
+	packet := readTest(t, connection)
+	if packet.Type != socketio.PacketConnect {
+		t.Fatalf("connect %#v", packet)
+	}
+}
+
+func TestNamespaceAuthenticationLifecycle(t *testing.T) {
+	s, url := testServer(t, Config{})
+	n, err := s.Of("/private")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.Use(func(_ context.Context, socket *Socket) error {
+		auth, _ := socket.Auth().(map[string]any)
+		if auth["token"] != "allowed" {
+			return errors.New("secret internal reason")
+		}
+		return nil
+	})
+	c := dialTest(t, url)
+	writeTest(t, c, `40/private,{"token":"wrong"}`)
+	p := readTest(t, c)
+	if p.Type != socketio.PacketConnectError || strings.Contains(p.Data.(map[string]any)["message"].(string), "secret") {
+		t.Fatal(p)
+	}
+	writeTest(t, c, `40/private,{"token":"allowed"}`)
+	private := readTest(t, c)
+	if private.Type != socketio.PacketConnect {
+		t.Fatal(private)
+	}
+	connectTest(t, c, "/")
+	if len(n.Sockets()) != 1 || len(s.Default().Sockets()) != 1 {
+		t.Fatal("missing membership")
+	}
+	if n.Sockets()[0].ID() == s.Default().Sockets()[0].ID() {
+		t.Fatal("namespace IDs reused")
+	}
+	if err := s.Default().On("echo", func(ctx context.Context, socket *Socket, args []any, ack Ack) error {
+		return socket.Emit(ctx, "echo", args...)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeTest(t, c, "41/private,")
+	writeTest(t, c, `42["echo","alive"]`)
+	if readTest(t, c).Data.([]any)[1] != "alive" {
+		t.Fatal("other namespace disconnected")
+	}
+	if len(n.Sockets()) != 0 {
+		t.Fatal("namespace retained")
+	}
+}
+
+func TestEventBeforeConnectAndReservedEventsClose(t *testing.T) {
+	for _, packet := range []string{`42["hello"]`, `42["disconnect"]`, `40/unknown,`} {
+		t.Run(packet, func(t *testing.T) {
+			_, url := testServer(t, Config{})
+			c := dialTest(t, url)
+			if packet == `42["disconnect"]` {
+				connectTest(t, c, "/")
+			}
+			writeTest(t, c, packet)
+			if packet == `40/unknown,` {
+				if readTest(t, c).Type != socketio.PacketConnectError {
+					t.Fatal("not rejected")
 				}
-			} else {
-				if err != nil {
-					t.Errorf("BroadcastEvent() unexpected error = %v", err)
-				}
+				return
+			}
+			if _, _, err := c.ReadMessage(); err == nil {
+				t.Fatal("protocol violation kept open")
 			}
 		})
 	}
 }
 
-func TestServer_Integration(t *testing.T) {
-	// 1. Setup the Server
-	gs := NewServer()
-	ts := httptest.NewServer(gs)
-	defer ts.Close()
-
-	// Convert http URL to ws URL
-	url := "ws" + strings.TrimPrefix(ts.URL, "http")
-
-	// 2. Connect a client
-	dialer := websocket.Dialer{}
-	ws, _, err := dialer.Dial(url, nil)
-	if err != nil {
-		t.Fatalf("Failed to connect to websocket: %v", err)
+func TestEventsBinaryAndAcks(t *testing.T) {
+	s, url := testServer(t, Config{})
+	duplicate := make(chan error, 1)
+	if err := s.Default().On("echo", func(ctx context.Context, socket *Socket, args []any, ack Ack) error {
+		if ack != nil {
+			if err := ack(ctx, args...); err != nil {
+				return err
+			}
+			duplicate <- ack(ctx)
+			return nil
+		}
+		return socket.Emit(ctx, "echo", args...)
+	}); err != nil {
+		t.Fatal(err)
 	}
-	defer ws.Close()
-
-	// Give the hub a moment to register the client
-	time.Sleep(50 * time.Millisecond)
-
-	t.Run("Broadcast Flow", func(t *testing.T) {
-		testData := map[string]string{"msg": "integration test"}
-		err := gs.BroadcastEvent("test-event", testData)
-		if err != nil {
-			t.Fatalf("Broadcast failed: %v", err)
-		}
-
-		// Read from websocket
-		_, message, err := ws.ReadMessage()
-		if err != nil {
-			t.Fatalf("Failed to read message: %v", err)
-		}
-
-		var received Event
-		if err := json.Unmarshal(message, &received); err != nil {
-			t.Fatalf("Failed to unmarshal received message: %v", err)
-		}
-
-		if received.Name != "test-event" {
-			t.Errorf("Expected event name test-event, got %s", received.Name)
-		}
-	})
-
-	t.Run("Inbound Flow", func(t *testing.T) {
-		clientMsg := Event{
-			Name: "client-message",
-			Data: json.RawMessage(`{"text":"hello server"}`),
-		}
-		msgBytes, _ := json.Marshal(clientMsg)
-
-		if err := ws.WriteMessage(websocket.TextMessage, msgBytes); err != nil {
-			t.Fatalf("Failed to write message: %v", err)
-		}
-
-		// Wait for the message to appear in the Events() pipe
-		select {
-		case ctx := <-gs.Events():
-			if ctx.Event.Name != "client-message" {
-				t.Errorf("Expected event client-message, got %s", ctx.Event.Name)
-			}
-			var data map[string]string
-			json.Unmarshal(ctx.Event.Data, &data)
-			if data["text"] != "hello server" {
-				t.Errorf("Expected text 'hello server', got '%s'", data["text"])
-			}
-		case <-time.After(500 * time.Millisecond):
-			t.Error("Timed out waiting for inbound event")
-		}
-	})
+	c := dialTest(t, url)
+	connectTest(t, c, "/")
+	writeTest(t, c, `4212["echo",1,"text"]`)
+	p := readTest(t, c)
+	if p.Type != socketio.PacketAck || *p.ID != 12 || len(p.Data.([]any)) != 2 {
+		t.Fatal(p)
+	}
+	if err := <-duplicate; !errors.Is(err, ErrAlreadyAcknowledged) {
+		t.Fatal(err)
+	}
+	writeTest(t, c, `451-["echo",{"_placeholder":true,"num":0}]`)
+	if err := c.WriteMessage(websocket.BinaryMessage, []byte{0, 1, 255}); err != nil {
+		t.Fatal(err)
+	}
+	p = readTest(t, c)
+	if string(p.Data.([]any)[1].([]byte)) != string([]byte{0, 1, 255}) {
+		t.Fatal(p)
+	}
 }
 
-func TestServer_Rooms(t *testing.T) {
-	// 1. Setup the Server
-	gs := NewServer()
-	ts := httptest.NewServer(gs)
-	defer ts.Close()
-
-	// Convert http URL to ws URL
-	url := "ws" + strings.TrimPrefix(ts.URL, "http")
-
-	// 2. Connect client 1
-	dialer := websocket.Dialer{}
-	ws1, _, err := dialer.Dial(url, nil)
+func TestSynchronousAckInsideConnectHandler(t *testing.T) {
+	s, url := testServer(t, Config{AckTimeout: time.Second})
+	done := make(chan error, 1)
+	s.Default().OnConnect(func(ctx context.Context, socket *Socket) {
+		args, err := socket.EmitWithAck(ctx, "question", "answer?")
+		if err == nil && args[0] != "yes" {
+			err = errors.New("wrong ack")
+		}
+		done <- err
+	})
+	c := dialTest(t, url)
+	connectTest(t, c, "/")
+	p := readTest(t, c)
+	encoded, err := socketio.NewCodec(0, 0).Encode(socketio.Packet{Type: socketio.PacketAck, ID: p.ID, Data: []any{"yes"}})
 	if err != nil {
-		t.Fatalf("Failed to connect ws1: %v", err)
+		t.Fatal(err)
 	}
-	defer ws1.Close()
-
-	// 3. Connect client 2
-	ws2, _, err := dialer.Dial(url, nil)
-	if err != nil {
-		t.Fatalf("Failed to connect ws2: %v", err)
+	writeTest(t, c, "4"+string(encoded.Header))
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
-	defer ws2.Close()
+}
 
-	// Give the hub a moment to register both clients
-	time.Sleep(50 * time.Millisecond)
-
-	// Send identify message from client 1
-	clientMsg1 := Event{Name: "id1", Data: json.RawMessage(`{}`)}
-	msgBytes1, _ := json.Marshal(clientMsg1)
-	ws1.WriteMessage(websocket.TextMessage, msgBytes1)
-
-	// Send identify message from client 2
-	clientMsg2 := Event{Name: "id2", Data: json.RawMessage(`{}`)}
-	msgBytes2, _ := json.Marshal(clientMsg2)
-	ws2.WriteMessage(websocket.TextMessage, msgBytes2)
-
-	var client1, client2 *Client
+func TestRoomsBroadcastAndAckCleanup(t *testing.T) {
+	s, url := testServer(t, Config{AckTimeout: 20 * time.Millisecond})
+	sockets := make(chan *Socket, 3)
+	s.Default().OnConnect(func(_ context.Context, socket *Socket) { sockets <- socket })
+	clients := make([]*websocket.Conn, 3)
+	members := make([]*Socket, 3)
+	for i := range clients {
+		clients[i] = dialTest(t, url)
+		connectTest(t, clients[i], "/")
+		members[i] = <-sockets
+	}
+	if err := members[0].Join("a", "b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := members[1].Join("b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := members[2].Join("excluded"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Default().To("a", "b").Except("excluded").Emit(context.Background(), "news", 7); err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < 2; i++ {
-		select {
-		case ctx := <-gs.Events():
-			if ctx.Event.Name == "id1" {
-				client1 = ctx.Client
-			} else if ctx.Event.Name == "id2" {
-				client2 = ctx.Client
-			}
-		case <-time.After(500 * time.Millisecond):
-			t.Fatal("Timed out waiting for client identity messages")
+		if readTest(t, clients[i]).Data.([]any)[0] != "news" {
+			t.Fatal("missing broadcast")
 		}
 	}
-
-	if client1 == nil || client2 == nil {
-		t.Fatal("Failed to obtain client pointers")
+	if err := members[0].To("b").Emit(context.Background(), "next"); err != nil {
+		t.Fatal(err)
 	}
+	if readTest(t, clients[1]).Data.([]any)[0] != "next" {
+		t.Fatal("duplicate broadcast")
+	}
+	_, err := members[0].EmitWithAck(context.Background(), "timeout")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	members[0].mu.Lock()
+	pending := len(members[0].pending)
+	members[0].mu.Unlock()
+	if pending != 0 {
+		t.Fatal("leaked ack")
+	}
+	if err := members[0].Disconnect(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if len(members[0].Rooms()) != 0 {
+		t.Fatal("rooms retained")
+	}
+	if err := members[0].Join("x"); !errors.Is(err, ErrConnectionClosed) {
+		t.Fatal(err)
+	}
+}
 
-	// 4. Join room-a for client1
-	gs.JoinRoom(client1, "room-a")
-	time.Sleep(20 * time.Millisecond)
-
-	// 5. Broadcast to room-a
-	testData := map[string]string{"msg": "room only"}
-	err = gs.BroadcastToRoom("room-a", "room-event", testData)
+func TestCORSConfigAndLimits(t *testing.T) {
+	if _, err := NewServer(Config{MaxPayload: -1}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatal(err)
+	}
+	s, url := testServer(t, Config{CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == "https://allowed.test" }, AllowCredentials: true, MaxRoomsPerSocket: 2})
+	req := httptest.NewRequest("OPTIONS", "http://server/socket.io/?EIO=4&transport=polling", nil)
+	req.Header.Set("Origin", "https://allowed.test")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != 204 || w.Header().Get("Access-Control-Allow-Credentials") != "true" {
+		t.Fatal(w)
+	}
+	req.Header.Set("Origin", "https://forbidden.test")
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != 403 {
+		t.Fatal(w)
+	}
+	c, _, err := websocket.DefaultDialer.Dial(url, http.Header{"Origin": []string{"https://allowed.test"}})
 	if err != nil {
-		t.Fatalf("BroadcastToRoom failed: %v", err)
+		t.Fatal(err)
 	}
-
-	// Client 1 should receive the message
-	_, message1, err := ws1.ReadMessage()
-	if err != nil {
-		t.Fatalf("ws1 failed to read: %v", err)
+	defer c.Close()
+	if _, _, err := c.ReadMessage(); err != nil {
+		t.Fatal(err)
 	}
-	var rec1 Event
-	json.Unmarshal(message1, &rec1)
-	if rec1.Name != "room-event" {
-		t.Errorf("Expected room-event, got %s", rec1.Name)
+	connectTest(t, c, "/")
+	socket := s.Default().Sockets()[0]
+	if err := socket.Join("one", "two"); err == nil {
+		t.Fatal("room cap bypassed")
 	}
-
-	// Begin a read before the next broadcast. If client 2 incorrectly received
-	// the first room event, the read completes during this quiet window. Keeping
-	// the read pending avoids corrupting the Gorilla connection with a timeout.
-	type readResult struct {
-		message []byte
-		err     error
+	if len(socket.Rooms()) != 1 {
+		t.Fatal("partial join")
 	}
-	client2Read := make(chan readResult, 1)
-	go func() {
-		_, message, readErr := ws2.ReadMessage()
-		client2Read <- readResult{message: message, err: readErr}
-	}()
-	select {
-	case result := <-client2Read:
-		t.Fatalf("Client 2 received an unexpected message: %q (error: %v)", result.message, result.err)
-	case <-time.After(50 * time.Millisecond):
+	if _, err := s.Of("/bad,namespace"); err == nil {
+		t.Fatal("invalid namespace")
 	}
+}
 
-	// 6. Join room-a for client2
-	gs.JoinRoom(client2, "room-a")
-	time.Sleep(20 * time.Millisecond)
-
-	// 7. Broadcast to room-a
-	gs.BroadcastToRoom("room-a", "room-event-2", testData)
-
-	// Both should receive it
-	_, message1, _ = ws1.ReadMessage()
-	json.Unmarshal(message1, &rec1)
-	if rec1.Name != "room-event-2" {
-		t.Errorf("Expected room-event-2 for client1, got %s", rec1.Name)
+func TestConcurrentEmitsDoNotInterleaveBinary(t *testing.T) {
+	s, url := testServer(t, Config{})
+	c := dialTest(t, url)
+	connectTest(t, c, "/")
+	socket := s.Default().Sockets()[0]
+	var wg sync.WaitGroup
+	errs := make(chan error, 20)
+	for i := range 20 {
+		wg.Add(1)
+		go func(i int) { defer wg.Done(); errs <- socket.Emit(context.Background(), "binary", i, []byte{byte(i)}) }(i)
 	}
-
-	result2 := <-client2Read
-	if result2.err != nil {
-		t.Fatalf("ws2 failed to read: %v", result2.err)
+	seen := map[string]bool{}
+	for range 20 {
+		p := readTest(t, c)
+		args := p.Data.([]any)
+		key := args[1].(json.Number).String()
+		if seen[key] {
+			t.Fatal("duplicate")
+		}
+		seen[key] = true
 	}
-	message2 := result2.message
-	var rec2 Event
-	json.Unmarshal(message2, &rec2)
-	if rec2.Name != "room-event-2" {
-		t.Errorf("Expected room-event-2 for client2, got %s", rec2.Name)
-	}
-
-	// 8. Leave room-a for client1
-	gs.LeaveRoom(client1, "room-a")
-	time.Sleep(20 * time.Millisecond)
-
-	// 9. Broadcast to room-a
-	gs.BroadcastToRoom("room-a", "room-event-3", testData)
-
-	// Client 2 should receive it
-	_, message2, _ = ws2.ReadMessage()
-	json.Unmarshal(message2, &rec2)
-	if rec2.Name != "room-event-3" {
-		t.Errorf("Expected room-event-3 for client2, got %s", rec2.Name)
-	}
-
-	// Client 1 should NOT receive it. Closing ws1 at test cleanup unblocks the
-	// pending read without setting a destructive read deadline.
-	client1Read := make(chan readResult, 1)
-	go func() {
-		_, message, readErr := ws1.ReadMessage()
-		client1Read <- readResult{message: message, err: readErr}
-	}()
-	select {
-	case result := <-client1Read:
-		t.Fatalf("Client 1 received an unexpected message after leaving: %q (error: %v)", result.message, result.err)
-	case <-time.After(50 * time.Millisecond):
+	wg.Wait()
+	for range 20 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
 	}
 }

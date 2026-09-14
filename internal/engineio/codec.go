@@ -3,6 +3,7 @@ package engineio
 import (
 	"errors"
 	"fmt"
+	"unicode/utf8"
 )
 
 var (
@@ -12,9 +13,11 @@ var (
 	// ErrInvalidPacketType indicates an unknown Engine.IO packet type.
 	ErrInvalidPacketType = errors.New("engineio: invalid packet type")
 
-	// ErrInvalidBinaryPacket indicates an attempt to represent a non-message
-	// packet as a binary WebSocket frame.
+	// ErrInvalidBinaryPacket rejects binary frames for non-message packets.
 	ErrInvalidBinaryPacket = errors.New("engineio: only message packets may be binary")
+
+	// ErrInvalidTextEncoding indicates a text packet that is not valid UTF-8.
+	ErrInvalidTextEncoding = errors.New("engineio: invalid UTF-8 text packet")
 )
 
 // EncodeFrame encodes a packet as one Engine.IO WebSocket frame.
@@ -30,6 +33,9 @@ func EncodeFrame(packet Packet) (Frame, error) {
 
 		return Frame{Payload: cloneBytes(packet.Data), Binary: true}, nil
 	}
+	if !utf8.Valid(packet.Data) {
+		return Frame{}, ErrInvalidTextEncoding
+	}
 
 	payload := make([]byte, 1+len(packet.Data))
 	payload[0] = byte(packet.Type) + '0'
@@ -38,8 +44,7 @@ func EncodeFrame(packet Packet) (Frame, error) {
 	return Frame{Payload: payload}, nil
 }
 
-// DecodeFrame decodes one Engine.IO WebSocket frame. A binary WebSocket frame
-// is an Engine.IO message packet whose payload is the frame bytes themselves.
+// DecodeFrame decodes one Engine.IO WebSocket frame.
 func DecodeFrame(frame Frame) (Packet, error) {
 	if frame.Binary {
 		return Packet{
@@ -51,6 +56,9 @@ func DecodeFrame(frame Frame) (Packet, error) {
 
 	if len(frame.Payload) == 0 {
 		return Packet{}, ErrEmptyFrame
+	}
+	if !utf8.Valid(frame.Payload) {
+		return Packet{}, ErrInvalidTextEncoding
 	}
 
 	packetType := PacketType(frame.Payload[0] - '0')

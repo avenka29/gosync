@@ -8,6 +8,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -45,9 +46,7 @@ func NewCodec(maxAttachments, maxDepth int) Codec {
 	return Codec{maxAttachments: maxAttachments, maxDepth: maxDepth}
 }
 
-// Encode validates and encodes one Socket.IO packet. The returned header is the
-// payload of a text Engine.IO message packet; it does not include Engine.IO's
-// leading "4" packet type.
+// Encode validates and encodes one Socket.IO packet.
 func (c Codec) Encode(packet Packet) (EncodedPacket, error) {
 	if !packet.Type.Valid() {
 		return EncodedPacket{}, fmt.Errorf("%w: %d", ErrInvalidPacketType, packet.Type)
@@ -114,9 +113,11 @@ func (c Codec) Encode(packet Packet) (EncodedPacket, error) {
 	return EncodedPacket{Header: header, Attachments: attachments}, nil
 }
 
-// DecodeHeader validates and decodes one Socket.IO text header. Binary packet
-// data still contains placeholders until Reconstruct is called.
+// DecodeHeader validates and decodes one Socket.IO text header.
 func (c Codec) DecodeHeader(header []byte) (Packet, error) {
+	if !utf8.Valid(header) {
+		return Packet{}, ErrInvalidPayload
+	}
 	if len(header) == 0 {
 		return Packet{}, ErrEmptyPacket
 	}
@@ -133,21 +134,29 @@ func (c Codec) DecodeHeader(header []byte) (Packet, error) {
 			return Packet{}, fmt.Errorf("%w: missing attachment count", ErrInvalidAttachments)
 		}
 		dash += position
-		count, err := strconv.ParseUint(string(header[position:dash]), 10, 31)
+		for _, b := range header[position:dash] {
+			if b < '0' || b > '9' {
+				return Packet{}, ErrInvalidAttachments
+			}
+		}
+		count, err := strconv.Atoi(string(header[position:dash]))
 		if err != nil || count == 0 {
 			return Packet{}, fmt.Errorf("%w: invalid attachment count", ErrInvalidAttachments)
 		}
-		if count > uint64(c.maxAttachments) {
+		if count > c.maxAttachments {
 			return Packet{}, fmt.Errorf("%w: %d > %d", ErrAttachmentLimit, count, c.maxAttachments)
 		}
-		packet.Attachments = int(count)
+		packet.Attachments = count
 		position = dash + 1
 	}
 
 	if position < len(header) && header[position] == '/' {
 		comma := bytes.IndexByte(header[position:], ',')
 		if comma < 0 {
-			return Packet{}, fmt.Errorf("%w: custom namespace is missing delimiter", ErrInvalidNamespace)
+			if packet.Type != PacketConnect && packet.Type != PacketDisconnect {
+				return Packet{}, ErrInvalidNamespace
+			}
+			comma = len(header) - position
 		}
 		comma += position
 		packet.Namespace = string(header[position:comma])
@@ -191,6 +200,9 @@ func (c Codec) DecodeHeader(header []byte) (Packet, error) {
 	if err := validatePacket(packet); err != nil {
 		return Packet{}, err
 	}
+	if err := c.validateTree(packet.Data, 0, packet.Attachments); err != nil {
+		return Packet{}, err
+	}
 
 	return packet, nil
 }
@@ -207,6 +219,11 @@ func (c Codec) Reconstruct(packet Packet, attachments [][]byte) (Packet, error) 
 		return Packet{}, fmt.Errorf("%w: %d > %d", ErrAttachmentLimit, len(attachments), c.maxAttachments)
 	}
 
+	owned := make([][]byte, len(attachments))
+	for i, b := range attachments {
+		owned[i] = cloneBytes(b)
+	}
+	attachments = owned
 	used := make([]bool, len(attachments))
 	data, err := c.reconstructValue(packet.Data, attachments, used, 0)
 	if err != nil {
@@ -304,7 +321,7 @@ func (c Codec) reconstructValue(value any, attachments [][]byte, used []bool, de
 				return nil, fmt.Errorf("%w: invalid placeholder index", ErrInvalidAttachments)
 			}
 			used[index] = true
-			return cloneBytes(attachments[index]), nil
+			return attachments[index], nil
 		}
 
 		result := make(map[string]any, len(typed))
@@ -322,6 +339,9 @@ func (c Codec) reconstructValue(value any, attachments [][]byte, used []bool, de
 }
 
 func validatePacket(packet Packet) error {
+	if packet.ID != nil && *packet.ID > 9007199254740991 {
+		return ErrInvalidPacketID
+	}
 	if !packet.Type.Valid() {
 		return fmt.Errorf("%w: %d", ErrInvalidPacketType, packet.Type)
 	}
@@ -405,4 +425,31 @@ func cloneBytes(source []byte) []byte {
 	cloned := make([]byte, len(source))
 	copy(cloned, source)
 	return cloned
+}
+
+func (c Codec) validateTree(value any, depth, attachments int) error {
+	if depth > c.maxDepth {
+		return ErrNestingLimit
+	}
+	switch v := value.(type) {
+	case []any:
+		for _, item := range v {
+			if err := c.validateTree(item, depth+1, attachments); err != nil {
+				return err
+			}
+		}
+	case map[string]any:
+		if placeholder, ok := v["_placeholder"].(bool); ok && placeholder && attachments > 0 {
+			i, err := placeholderIndex(v["num"])
+			if err != nil || i < 0 || i >= attachments {
+				return ErrInvalidAttachments
+			}
+		}
+		for _, item := range v {
+			if err := c.validateTree(item, depth+1, attachments); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

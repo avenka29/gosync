@@ -1,4 +1,2 @@
-// Package engineio implements the wire-level pieces of Engine.IO protocol
-// revision 4. It deliberately contains no HTTP routing, WebSocket operations,
-// room state, or application callbacks.
+// Package engineio implements Engine.IO protocol revision 4 framing and sessions.
 package engineio

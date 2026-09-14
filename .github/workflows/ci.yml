@@ -1,0 +1,107 @@
+name: verification
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verification-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: linux
+            goarch: "386"
+          - goos: windows
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build ./...
+
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      redis:
+        image: redis:8-alpine@sha256:becdda6c7f4b3fb42e42fd7f120bbf5c54c4caaaf16f26da24e4563d2c1f0576
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s
+          --health-timeout 3s --health-retries 10
+    env:
+      GOSYNC_REDIS_ADDR: 127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: integration/package-lock.json
+      - name: Verify source and dependencies
+        run: |
+          go mod verify
+          test -z "$(go run mvdan.cc/gofumpt@v0.12.0 -l .)"
+      - name: Test
+        run: |
+          go test -race -count=3 -timeout=3m ./...
+          go test -coverpkg=./... -coverprofile=coverage.out ./...
+          coverage=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
+          awk -v coverage="$coverage" 'BEGIN {if (coverage < 80) exit 1}'
+      - name: Analyze Go source
+        run: |
+          go vet ./...
+          go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+          go run github.com/go-critic/go-critic/cmd/gocritic@v0.15.0 check ./...
+          go run github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0 -over 35 .
+          go run golang.org/x/tools/cmd/deadcode@v0.49.0 -test ./...
+          go run github.com/securego/gosec/v2/cmd/gosec@v2.29.0 ./...
+          go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - name: Analyze workflow
+        run: |
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          shellcheck scripts/*.sh
+      - name: Fuzz protocol decoders
+        run: |
+          go test ./internal/engineio -run='^$' -fuzz=FuzzDecodeFrame -fuzztime=10s
+          go test ./internal/engineio -run='^$' -fuzz=FuzzDecodePayload -fuzztime=10s
+          go test ./internal/socketio -run='^$' -fuzz=FuzzDecodeHeader -fuzztime=10s
+      - name: Install JavaScript test dependencies
+        working-directory: integration
+        run: npm ci --ignore-scripts && npm audit --audit-level=low
+      - name: Build patched official C++ client
+        run: bash scripts/build-cpp-client.sh "$RUNNER_TEMP/gosync-cpp"
+      - name: Run conformance and client checks
+        run: |
+          go build -o "$RUNNER_TEMP/gosync-fixture" ./cmd/conformance
+          bash scripts/conformance.sh "$RUNNER_TEMP/gosync-fixture" "$RUNNER_TEMP/gosync-cpp/cpp-check"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: coverage
+          path: coverage.out

@@ -41,16 +41,14 @@ func (t PacketType) String() string {
 	}
 }
 
-// Packet is the transport-independent representation of one Engine.IO packet.
-// Binary is valid only for message packets.
+// Packet is one transport-independent Engine.IO packet.
 type Packet struct {
 	Type   PacketType
 	Data   []byte
 	Binary bool
 }
 
-// Frame is one WebSocket frame. Payload is text when Binary is false and raw
-// binary data when Binary is true.
+// Frame is one text or binary transport frame.
 type Frame struct {
 	Payload []byte
 	Binary  bool

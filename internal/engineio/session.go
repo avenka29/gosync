@@ -26,17 +26,14 @@ var (
 	ErrUnexpectedPacket     = errors.New("engineio: unexpected packet")
 )
 
-// Transport carries already-demarcated Engine.IO frames. An implementation must
-// support one concurrent reader and one writer, and Close must unblock Read.
+// Transport carries Engine.IO frames with one concurrent reader and writer.
 type Transport interface {
 	Read(context.Context) (Frame, error)
 	Write(context.Context, Frame) error
 	Close() error
 }
 
-// MessageHandler receives Engine.IO message packets sequentially. It must not
-// retain packet.Data without copying it. Transport lifecycle processing remains
-// independent while the handler runs.
+// MessageHandler receives Engine.IO message packets sequentially.
 type MessageHandler func(context.Context, Packet) error
 
 // SessionConfig contains validated limits for one physical Engine.IO session.
@@ -52,8 +49,7 @@ type SessionConfig struct {
 	newTimer timerFactory
 }
 
-// Session owns the lifecycle and ordered writes of one Engine.IO connection.
-// Run must be called exactly once.
+// Session owns one Engine.IO connection and its ordered writes.
 type Session struct {
 	config    SessionConfig
 	transport Transport
@@ -67,6 +63,7 @@ type Session struct {
 type sendRequest struct {
 	packet Packet
 	result chan error
+	ctx    context.Context
 }
 
 type readResult struct {
@@ -129,7 +126,10 @@ func (s *Session) Send(ctx context.Context, packet Packet) error {
 		return fmt.Errorf("%w: Send accepts message packets only", ErrUnexpectedPacket)
 	}
 
-	request := sendRequest{packet: packet, result: make(chan error, 1)}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	request := sendRequest{packet: Packet{Type: packet.Type, Data: cloneBytes(packet.Data), Binary: packet.Binary}, result: make(chan error, 1), ctx: ctx}
 	select {
 	case s.outbound <- request:
 	case <-s.done:
@@ -153,8 +153,7 @@ func (s *Session) Done() <-chan struct{} {
 	return s.done
 }
 
-// Run performs the handshake and owns session state until closure. Calling Run
-// more than once returns ErrSessionClosed.
+// Run performs the handshake and owns session state until closure.
 func (s *Session) Run(parent context.Context) error {
 	ran := false
 	s.runOnce.Do(func() { ran = true })
@@ -163,24 +162,43 @@ func (s *Session) Run(parent context.Context) error {
 	}
 
 	ctx, cancel := context.WithCancel(parent)
-	defer cancel()
-	defer close(s.done)
-	defer s.transport.Close()
+	var workers sync.WaitGroup
+	defer func() {
+		cancel()
+		_ = s.transport.Close()
+		workers.Wait()
+		close(s.done)
+	}()
+	stop := context.AfterFunc(ctx, func() { _ = s.transport.Close() })
+	defer stop()
 
 	if err := s.writeHandshake(ctx); err != nil {
 		return err
 	}
 
 	reads := make(chan readResult, 1)
-	go s.readLoop(ctx, reads)
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		s.readLoop(ctx, reads)
+	}()
 
 	inbound := make(chan Packet, s.config.InboundBuffer)
 	handlerErrors := make(chan error, 1)
-	go s.handlerLoop(ctx, inbound, handlerErrors)
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		s.handlerLoop(ctx, inbound, handlerErrors)
+	}()
 
 	pingTimer := s.config.newTimer(s.config.PingInterval)
 	defer pingTimer.Stop()
 	var pongTimer sessionTimer
+	defer func() {
+		if pongTimer != nil {
+			pongTimer.Stop()
+		}
+	}()
 	awaitingPong := false
 
 	for {
@@ -221,14 +239,24 @@ func (s *Session) Run(parent context.Context) error {
 					return ErrInboundQueueFull
 				}
 			case PacketClose:
+				if closer, ok := s.transport.(interface{ ClientClose() }); ok {
+					closer.ClientClose()
+				}
 				return nil
 			case PacketNoop:
-				// Noop is valid during transport coordination and has no payload.
 			default:
 				return fmt.Errorf("%w: received %s from client", ErrUnexpectedPacket, packet.Type)
 			}
 		case request := <-s.outbound:
-			request.result <- s.writePacket(ctx, request.packet)
+			if err := request.ctx.Err(); err != nil {
+				request.result <- err
+				continue
+			}
+			err := s.writePacket(ctx, request.packet)
+			request.result <- err
+			if err != nil {
+				return err
+			}
 		case <-pingTimer.Channel():
 			if awaitingPong {
 				return ErrHeartbeatTimeout
@@ -283,6 +311,14 @@ func (s *Session) readLoop(ctx context.Context, results chan<- readResult) {
 }
 
 func (s *Session) handlerLoop(ctx context.Context, messages <-chan Packet, results chan<- error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			select {
+			case results <- fmt.Errorf("engineio: handler panic: %v", recovered):
+			case <-ctx.Done():
+			}
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():

@@ -121,7 +121,6 @@ func TestDecodeAndReconstructBinaryEvent(t *testing.T) {
 		t.Fatalf("Reconstruct(short attachments) error = %v, want ErrInvalidAttachments", err)
 	}
 
-	// Change the header to declare the one attachment it actually references.
 	packet.Attachments = 1
 	attachment := []byte{0x01, 0x02}
 	reconstructed, err := codec.Reconstruct(packet, [][]byte{attachment})
@@ -224,6 +223,43 @@ func TestRawJSONNormalization(t *testing.T) {
 	}
 	if got, want := string(encoded.Header), `2["event",{"answer":42}]`; got != want {
 		t.Fatalf("Encode() = %q, want %q", got, want)
+	}
+}
+
+func TestCodecLimitsAtExactBoundaries(t *testing.T) {
+	t.Parallel()
+
+	codec := NewCodec(2, 4)
+	if _, err := codec.DecodeHeader([]byte(`29007199254740991["event"]`)); err != nil {
+		t.Fatalf("maximum safe packet ID rejected: %v", err)
+	}
+	if _, err := codec.DecodeHeader([]byte(`29007199254740992["event"]`)); !errors.Is(err, ErrInvalidPacketID) {
+		t.Fatalf("unsafe packet ID error = %v", err)
+	}
+	if _, err := codec.DecodeHeader([]byte(`599999999999999999999999-["event"]`)); !errors.Is(err, ErrInvalidAttachments) {
+		t.Fatalf("overflowing attachment count error = %v", err)
+	}
+	if _, err := codec.DecodeHeader([]byte(`51-["event",{"_placeholder":true,"num":0.5}]`)); !errors.Is(err, ErrInvalidAttachments) {
+		t.Fatalf("fractional placeholder error = %v", err)
+	}
+
+	withinDepth := any("value")
+	for range 3 {
+		withinDepth = []any{withinDepth}
+	}
+	if _, err := codec.Encode(Packet{Type: PacketEvent, Data: []any{"event", withinDepth}}); err != nil {
+		t.Fatalf("maximum depth rejected: %v", err)
+	}
+	tooDeep := []any{withinDepth}
+	if _, err := codec.Encode(Packet{Type: PacketEvent, Data: []any{"event", tooDeep}}); !errors.Is(err, ErrNestingLimit) {
+		t.Fatalf("excess depth error = %v", err)
+	}
+
+	if _, err := codec.Encode(Packet{Type: PacketEvent, Data: []any{"event", []byte{1}, []byte{2}}}); err != nil {
+		t.Fatalf("maximum attachment count rejected: %v", err)
+	}
+	if _, err := codec.Encode(Packet{Type: PacketEvent, Data: []any{"event", []byte{1}, []byte{2}, []byte{3}}}); !errors.Is(err, ErrAttachmentLimit) {
+		t.Fatalf("excess attachment error = %v", err)
 	}
 }
 
