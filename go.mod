@@ -4,8 +4,8 @@ go 1.26.6
 
 require (
 	github.com/gorilla/websocket v1.5.3
-	github.com/quic-go/quic-go v0.60.0
-	github.com/quic-go/webtransport-go v0.11.1
+	github.com/quic-go/quic-go v0.62.0
+	github.com/quic-go/webtransport-go v0.13.0
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/zishang520/socket.io/clients/engine/v3 v3.0.4
 	github.com/zishang520/socket.io/clients/socket/v3 v3.0.4
